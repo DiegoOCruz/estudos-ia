@@ -4,7 +4,8 @@ from typing import Literal, Optional
 from pydantic import BaseModel
 
 MODELO = "bge-m3"
-LLM = "qwen2.5:14b"
+LLM = "qwen3.8:27b"
+#LLM = "qwen2.5:14b"
 CONEXAO = "postgresql://rag:rag@localhost:5432/rag"
 
 def embed(textos):
