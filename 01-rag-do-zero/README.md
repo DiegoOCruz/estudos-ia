@@ -11,7 +11,8 @@ O módulo tem duas partes:
 1. **Catálogo fictício** de uma loja de Funkos e impressão 3D: do numpy até um
    pipeline completo com PostgreSQL, filtros e LLM.
 2. **Dados reais:** 41 mil avaliações de clientes do dataset público da Olist,
-   com exploração, limpeza, indexação e índice HNSW.
+   com exploração, limpeza, indexação, índice HNSW e classificação de cada
+   comentário com um LLM.
 
 ## Arquivos
 
@@ -31,6 +32,12 @@ O módulo tem duas partes:
 | `schema_avaliacoes.sql` | Tabela `avaliacoes` com restrições de integridade |
 | `09_indexar_avaliacoes.py` | Vetoriza e grava as avaliações em lotes |
 | `10_buscar_avaliacoes.py` | Busca semântica nas avaliações, com filtro opcional por nota |
+| `classificacao.py` | Módulo de classificação: categorias, prompt, few-shot, `classificar` e o teste com respostas esperadas |
+| `11_medir_classificacao.py` | Mede o tempo de classificação numa amostra e projeta para o total |
+| `schema_classificacao.sql` | Colunas `problemas`, `sentimento` e `modelo_classificacao` na tabela `avaliacoes` |
+| `migracao_frete_prazo.sql` | Migração: acrescenta `frete_caro` e `prazo_longo` à restrição de `problemas` |
+| `12_classificar_avaliacoes.py` | Classifica todas as avaliações em lotes, de forma retomável |
+| `13_medir_paralelo.py` | Compara a classificação um por vez × pedidos simultâneos |
 
 ## Como funciona
 
@@ -196,7 +203,8 @@ resultados.
 **A nota não conta a história toda:** reclamações claras aparecem com notas 3
 e 4 ("Demorou muito pra chegar", nota 4). A nota resume a experiência inteira;
 o comentário fala de uma parte dela. Um filtro `nota <= 2` traz reclamações com
-segurança, mas perde as que estão escondidas nas notas medianas.
+segurança, mas perde as que estão escondidas nas notas medianas. O item 14
+mede quantas.
 
 ### 12. Índice HNSW e o planejador do PostgreSQL
 
@@ -215,10 +223,208 @@ segurança, mas perde as que estão escondidas nas notas medianas.
 - Script inteiro, 3 buscas: **0,84 s → 0,13 s**. Agora o tempo é dominado pela
   vetorização das consultas: o gargalo mudou de lugar.
 
+### 13. Classificação dos comentários com LLM
+
+Cada comentário passou pelo LLM uma vez e ganhou duas colunas novas: a **lista
+de problemas** citados e o **sentimento**. Assim dá para filtrar pelo conteúdo,
+e não pela nota.
+
+**O formato da resposta** (Pydantic, saída estruturada, temperatura zero):
+
+```python
+class Classificacao(BaseModel):
+    problemas: list[Problema]   # lista vazia = nenhum problema
+    sentimento: Literal["positivo", "negativo", "misto", "neutro"]
+```
+
+**As categorias saíram dos dados, não da imaginação.** Antes de escrever o
+código, li 30 comentários sorteados (notas ≤ 3) e agrupei por assunto. A
+primeira versão teve 7 categorias; a análise do resultado (item 14) revelou
+mais duas.
+
+| Categoria | Quando usar |
+|---|---|
+| `atraso_ou_nao_recebido` | atrasou ou ainda não chegou |
+| `problema_na_entrega` | endereço errado, retirada no correio |
+| `pedido_incompleto` | faltou item do pedido |
+| `produto_errado_ou_diferente` | outro produto, falsificado, diferente do anúncio |
+| `defeito_ou_qualidade` | defeito, danificado, má qualidade |
+| `atendimento_ou_financeiro` | o cliente **reclama** do atendimento: sem resposta, nota fiscal, cobrança indevida, reembolso |
+| `frete_caro` | acha o valor do frete alto |
+| `prazo_longo` | chegou no prazo, mas o prazo é longo |
+| `outro` | não se encaixa nas anteriores |
+
+**Decisões de design:**
+
+- **Lista, e não categoria única:** "veio apenas de microfibra" é pedido
+  incompleto e produto errado ao mesmo tempo.
+- **Atraso e não recebido juntos:** quando o cliente escreve, não dá para saber
+  se o produto vai chegar atrasado ou nunca.
+- **`problemas` antes de `sentimento`:** o LLM escreve da esquerda para a
+  direita, e o sentimento sai coerente com os problemas já listados.
+- **A nota não vai para o modelo:** para poder detectar quando o texto e a nota
+  se contradizem.
+- **`outro` existe de propósito:** sem ele, o modelo força o problema na
+  categoria menos errada.
+
+**Ajustando o prompt, um caso de cada vez:**
+
+| Problema | O que não funcionou | O que funcionou |
+|---|---|---|
+| "Não recebi, tive que buscar no correio" virava atraso | Definição mais precisa ("ainda não está com ele"): nada mudou, e quebrou outro caso | **Few-shot:** 4 exemplos resolvidos, entregues como conversa (user → assistant) |
+| "Como realizo a troca?" virava atendimento | — | Definição: o cliente precisa **reclamar** do atendimento; pedir troca não conta |
+
+- **O modelo segue a definição ao pé da letra:** "ainda não está com ele" fez
+  "Ainda não posso avaliar... quando chegar" virar atraso. O cliente não estava
+  reclamando, mas a definição não dizia que precisava.
+- **O prompt funciona como um todo:** mudar a definição de atendimento fez o
+  14B acertar um caso de prazo que não tinha nada a ver com atendimento.
+- **Exemplos do few-shot ≠ casos do teste:** senão o modelo copia a resposta e
+  o teste não prova nada.
+- **Exemplos dos dois lados da fronteira:** um atraso de verdade entre os
+  exemplos, para o modelo não aprender a evitar a categoria.
+
+**O teste:** 16 casos com resposta esperada, conferidos automaticamente (✓/✗ e
+placar). Cada falha nova encontrada em dados reais virou um caso. Um caso
+ambíguo (a cortina, que admite duas leituras) foi **retirado**: ele não separa
+um modelo bom de um ruim, só gera ruído no placar.
+
+**A escolha do modelo:**
+
+| | `qwen2.5:14b` | `qwen3.8:27b` (`think=False`) |
+|---|:-:|:-:|
+| Teste final (16 casos) | 11/16 | **15/16** |
+| Estabilidade entre versões do prompt | oscilou (perdia casos já acertados) | estável |
+| Tempo por comentário | 0,25 s | 0,70–0,85 s |
+| Tempo para 41 mil | ~3 h | ~8–9 h |
+
+O 27B foi escolhido: a classificação é feita uma vez, e uma classificação pior
+fica no banco para sempre.
+
+**Execução:** lotes de 100, com `commit` por lote, processando só
+`WHERE sentimento IS NULL`. O banco sabe o que falta, então o script é
+retomável: uma queda de energia no meio da noite custou só o lote em
+andamento. Antes de confiar nisso por 9 horas, testei de propósito: Ctrl+C
+depois de 4 lotes deixou exatamente 400 linhas gravadas.
+
+**NULL × `{}`:** `problemas` NULL = ainda não classificada; `{}` = classificada,
+sem problemas. É essa distinção que torna o script retomável.
+
+### 14. O que a classificação revelou
+
+**Problemas citados** (41.431 comentários, 19.416 menções):
+
+| Problema | Menções |
+|---|---:|
+| atraso_ou_nao_recebido | 5.454 |
+| defeito_ou_qualidade | 3.831 |
+| atendimento_ou_financeiro | 3.144 |
+| produto_errado_ou_diferente | 2.981 |
+| pedido_incompleto | 2.589 |
+| problema_na_entrega | 842 |
+| frete_caro | 264 |
+| prazo_longo | 204 |
+| outro | 107 |
+
+**A nota esconde um terço das reclamações** (números da primeira classificação
+completa):
+
+| Nota | Comentários | Com reclamação (negativo + misto) |
+|:-:|---:|---:|
+| 1 | 9.071 | 96% |
+| 2 | 2.200 | 93% |
+| 3 | 3.635 | 74% |
+| 4 | 5.996 | **32%** |
+| 5 | 20.529 | 5,5% |
+
+De 16.504 comentários com reclamação, um filtro `nota <= 2` pega 10.772 e
+**perde 5.732 (35%)**. Quase um em cada três clientes que deram nota 4
+reclamou de alguma coisa no texto.
+
+**Divergências entre nota e texto:** as duas células parecem simétricas, mas
+significam coisas diferentes.
+
+| | Nota 5 + negativo (476) | Nota 1 + positivo (79) |
+|---|---|---|
+| Amostra de 15 | 15 reclamações reais | 14 notas erradas, 1 erro do modelo |
+| Significado | o cliente reclamou apesar da nota alta (muitos escreveram enquanto esperavam uma solução) | o cliente errou a nota (talvez invertendo a escala) |
+
+O erro do modelo foi uma crítica indireta: *"Quando os produtos eram vendidos
+pela própria loja, chegavam sempre antes do prazo e sem problemas"* saiu
+positivo. O modelo leu as palavras, não o que a frase implica.
+
+**Uma categoria larga é um `outro` disfarçado.** Na primeira rodada, só 335
+menções caíram em `outro`, o que parecia provar que as categorias cobriam bem
+os dados. Lendo uma amostra de `atendimento_ou_financeiro`, apareceu o **frete
+caro** escondido ali: a palavra "financeiro" absorvia reclamações de preço. E o
+`outro` escondia o **prazo longo**.
+
+As duas categorias foram criadas, testadas, acrescentadas ao `CHECK` por uma
+migração, e só as ~3.800 linhas afetadas foram reclassificadas: bastou apagar a
+classificação delas (`sentimento = NULL`) e rodar o mesmo script. O mecanismo
+de retomada virou, de graça, um mecanismo de reclassificação seletiva.
+
+| | Antes | Depois |
+|---|---:|---:|
+| atendimento_ou_financeiro | 3.491 | 3.144 |
+| outro | 335 | 107 |
+| frete_caro | — | 264 |
+| prazo_longo | — | 204 |
+
+**A amostra descobre; não mede.** A amostra de 15 sugeria uns 900 casos de
+frete caro escondidos em atendimento; saíram 264. Com 15 casos, 4 em 15 é
+compatível com uma taxa real entre menos de 10% e mais de 50%. A amostra
+serviu para descobrir que a categoria existia; para medir quantas eram, foi
+preciso classificar tudo.
+
+**Limitações conhecidas:**
+
+- Comentários muito curtos com erro de digitação podem sair invertidos:
+  *"Produto ce qualidade"* (nota 5) sai negativo com defeito nos dois modelos.
+- Ironia e críticas indiretas passam como elogio.
+- A fronteira entre negativo e misto é difusa ("Chegou no prazo porém veio
+  arranhado" saiu negativo).
+- Temperatura zero não garante resultado idêntico: cerca de 1 em 60
+  classificações muda entre duas execuções, sempre em casos de fronteira.
+- A reclassificação seletiva só releu atendimento e `outro`: um frete caro que
+  tenha ido para outra categoria não foi revisto.
+
+### 15. Velocidade: raciocínio escondido e paralelismo
+
+**O modelo de 27B estava "pensando" antes de responder.** Medido com a mesma
+amostra, ele levava 3,10 s por comentário, contra 0,24 s do 14B: 13× mais
+lento por menos do que o dobro do tamanho. O `ollama ps` mostrou `100% GPU`, o
+que descartou falta de memória. A causa era o **modo de raciocínio** da família
+Qwen3: um texto escondido gerado antes de cada JSON.
+
+| | Por comentário | 41 mil |
+|---|---:|---:|
+| 27B com raciocínio | 3,10 s | 36 h |
+| 27B com `think=False` | 0,70 s | 8 h |
+
+A conta que fecha: a geração é limitada pela **largura de banda da memória** da
+GPU (tokens/s ≈ banda ÷ tamanho do modelo). 17 GB contra 9 GB explicam ~2×, não
+13×.
+
+**Paralelismo: não funcionou, e o motivo estava no log.** A ideia era enviar
+vários comentários ao mesmo tempo (`OLLAMA_NUM_PARALLEL=4` + threads no
+script), aproveitando a força de cálculo que sobra enquanto a placa lê o
+modelo.
+
+- **27B: ganho de 1,0×.** O log do Ollama dizia: *"model architecture does not
+  currently support parallel requests"* (arquitetura `qwen35`).
+- **14B: ficou 6× mais lento.** Cada pedido simultâneo reserva o seu próprio
+  contexto (32.768 tokens). Com 4, o modelo foi de 15 GB para 35 GB, e 35% foi
+  para a CPU.
+- **Revertido:** a variável vale para o servidor inteiro, e o modelo escolhido
+  não se beneficia. Para um próximo uso, a receita é limitar o contexto por
+  pedido (`num_ctx: 4096`; o prompt usa ~1.000 tokens) e conferir no
+  `ollama ps` que tudo continua `100% GPU`.
+
 ## Próximos passos
 
-- Classificar cada comentário com o LLM (reclamação? sobre o quê?), para
-  filtrar pelo conteúdo e não pela nota
+- Combinar a busca semântica com o filtro por problema no `10_buscar_avaliacoes.py`
+  (ex.: "reclamações de entrega" + `'problema_na_entrega' = ANY(problemas)`)
 - Busca híbrida: semântica + palavra-chave + filtros
 - Avaliação sistemática das respostas
 - Aplicar ao catálogo real da loja, com estoque
@@ -253,4 +459,16 @@ docker exec -i pgvector psql -U rag -d rag < schema_avaliacoes.sql
 python 09_indexar_avaliacoes.py
 docker exec -it pgvector psql -U rag -d rag -c "CREATE INDEX ON avaliacoes USING hnsw (embedding vector_cosine_ops);"
 python 10_buscar_avaliacoes.py
+```
+
+Classificação (banco novo: o `schema_classificacao.sql` já traz as nove
+categorias; banco criado antes dele: rodar também a migração):
+
+```bash
+ollama pull qwen3.8:27b
+docker exec -i pgvector psql -U rag -d rag < schema_classificacao.sql
+python classificacao.py                  # teste: 15/16 esperado
+python 11_medir_classificacao.py         # tempo numa amostra
+nohup python -u 12_classificar_avaliacoes.py > classificacao.log 2>&1 &
+tail -f classificacao.log
 ```

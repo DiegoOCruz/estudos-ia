@@ -11,6 +11,8 @@ Problema = Literal[
     "produto_errado_ou_diferente",
     "defeito_ou_qualidade",
     "atendimento_ou_financeiro",
+    "frete_caro",
+    "prazo_longo",
     "outro",
 ]
 
@@ -30,9 +32,9 @@ Problemas possíveis:
 - pedido_incompleto: faltou algum item do pedido
 - produto_errado_ou_diferente: veio outro produto, falsificado ou diferente do anúncio
 - defeito_ou_qualidade: produto com defeito, danificado ou de má qualidade
-- atendimento_ou_financeiro: o cliente reclama do atendimento ou da parte financeira: ficou sem resposta, 
-    foi mal atendido, nota fiscal, cobrança, reembolso. Pedir uma troca ou dizer que abriu uma reclamação 
-    não é, por si só, problema de atendimento.
+- atendimento_ou_financeiro: o cliente reclama do atendimento ou da parte financeira: ficou sem resposta, foi mal atendido, nota fiscal, cobrança indevida, reembolso. Pedir uma troca ou dizer que abriu uma reclamação não é, por si só, problema de atendimento.
+- frete_caro: o cliente acha o valor do frete alto. Uma cobrança errada de frete é atendimento_ou_financeiro.
+- prazo_longo: o produto chegou dentro do prazo, mas o cliente acha o prazo de entrega longo ou queria uma entrega mais rápida
 - outro: problema que não se encaixa em nenhuma categoria acima
 
 Sentimentos:
@@ -54,7 +56,7 @@ EXEMPLOS = [
     ),
     (
         "O prazo de entrega é muito longo, mas chegou na data prometida.",
-        Classificacao(problemas=["outro"], sentimento="negativo"),
+        Classificacao(problemas=["prazo_longo"], sentimento="negativo"),
     ),
     (
         "Já passou uma semana da data prevista e nada do produto.",
@@ -118,7 +120,11 @@ if __name__ == "__main__":
                 "negativo",
             ),
             ("Produto ce qualidade", [], "positivo"),
-            ("Muuuuito demorado, apesar de entregue no prazo!", ["outro"], "negativo"),
+            (
+                "Muuuuito demorado, apesar de entregue no prazo!",
+                ["prazo_longo"],
+                "negativo",
+            ),
             (
                 "Recebi o carregador, mas ele veio com defeito. Não está carregando o celular. Como realizo a troca?",
                 ["defeito_ou_qualidade"],
@@ -129,10 +135,27 @@ if __name__ == "__main__":
                 ["produto_errado_ou_diferente"],
                 "negativo",
             ),
+            ("So achei o preco do frete muito alto!", ["frete_caro"], "negativo"),
+            ("Adorei o produto, porém o frete muito caro.", ["frete_caro"], "misto"),
             (
-                "NAO TIVE RETORNO E NAO RECEBI A MERCADORIA COM MAIS DE 20 DIAS DE PEDIDO APROVADO",
-                ["atraso_ou_nao_recebido", "atendimento_ou_financeiro"],
+                "Cobraram 2 fretes para mesmo produto pois tinha comprado 2 unidades achei isso muita sacanagem !!!",
+                ["atendimento_ou_financeiro"],
                 "negativo",
+            ),
+            (
+                "Sempre compro no lannister.com, porém dessa vez tive uma experiência ruim, já passou o prazo de entrega e eu não recebi minhas poltronas além de ter pago um frete abusivo",
+                ["atraso_ou_nao_recebido", "frete_caro"],
+                "negativo",
+            ),
+            (
+                "Como eu estava precisando das tintas fiz o pedido só achei o prazo da entrega um pouco longo tirando isso esta tudo ok muito bom",
+                ["prazo_longo"],
+                "misto",
+            ),
+            (
+                "O produto é bom, mas no anúncio não constam as medidas o que é muito importante pra se fazer um investimento dessa ordem! Arrisquei e é comprei mesmo sem ter as medidas mas foi um risco desnecessário",
+                ["outro"],
+                "misto",
             ),
         ]
 

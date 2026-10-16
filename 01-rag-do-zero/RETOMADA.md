@@ -1,88 +1,75 @@
 # Retomada — 01-rag-do-zero
 
-Última sessão: 14/10/2026
+Última sessão: 16/10/2026
 
 ## Onde parei
 
-Comecei o primeiro item dos "Próximos passos" do README: **classificar cada
-comentário da Olist com o LLM**, para filtrar pelo conteúdo e não pela nota.
+A **classificação das 41.431 avaliações está completa e analisada**, com nove
+categorias de problema e o sentimento de cada comentário. README (itens 13 a
+15) e GLOSSARIO (seções novas: Avaliação e Infraestrutura) estão atualizados
+com tudo o que foi feito e aprendido.
 
-Arquivo: `11_classificar.py` (funcionando, testado com 7 exemplos fixos).
+Antes de seguir:
 
-## O que já está pronto
+- [ ] **Commit** de tudo: `classificacao.py`, `schema_classificacao.sql`,
+  `migracao_frete_prazo.sql`, `13_medir_paralelo.py`, `README.md`,
+  `GLOSSARIO.md`, `RETOMADA.md`
+- [ ] *(Opcional)* Atualizar no README a tabela nota × reclamação (item 14) com
+  os números finais: ela usa os da primeira classificação, antes de reclassificar
+  as ~3.800 linhas de atendimento e `outro`.
 
-- **Classe `Classificacao` (Pydantic)** com dois campos:
-  - `problemas`: lista (pode ser vazia) de categorias permitidas por `Literal`:
-    `atraso_ou_nao_recebido`, `problema_na_entrega`, `pedido_incompleto`,
-    `produto_errado_ou_diferente`, `defeito_ou_qualidade`,
-    `atendimento_ou_financeiro`, `outro`
-  - `sentimento`: `positivo`, `negativo`, `misto` ou `neutro`
-- **`PROMPT_SISTEMA`** com a definição de cada categoria e de cada sentimento.
-- **Few-shot:** 4 exemplos (`EXEMPLOS`) entregues como conversa falsa
-  (user → assistant) pela função `montar_mensagens`.
-- **`classificar(texto)`**: `qwen2.5:14b`, temperatura 0, saída estruturada.
-  Só o texto vai para o modelo, a nota não.
-
-## Decisões tomadas (e por quê)
-
-- **Categorias tiradas dos dados:** li 30 comentários sorteados (nota ≤ 3)
-  antes de definir as categorias.
-- **Lista, e não categoria única:** um comentário pode citar vários problemas
-  (as cortinas: pedido incompleto e produto errado).
-- **Atraso e não recebido juntos:** na hora em que o cliente escreve, não dá
-  para saber se o produto vai chegar atrasado ou nunca.
-- **Sentimento separado dos problemas:** "do que fala" × "como se sente".
-  Comentário positivo fica com a lista vazia.
-- **`problemas` antes de `sentimento`:** o LLM escreve da esquerda para a
-  direita; o sentimento sai coerente com os problemas já listados.
-- **A nota não vai para o modelo:** para detectar divergências, como
-  "PRODUTO ENTREGUE NO PRAZO COM QUALIDADE" com nota 1.
-- **`outro` existe de propósito:** evita forçar um problema na categoria
-  errada. Contar os `outro` depois mostra se falta categoria.
-
-## O que aprendi
-
-- **Mudar a definição não resolveu e piorou outro caso.** "Ainda não está com
-  ele" fez "Ainda não posso avaliar... quando chegar" virar atraso: o modelo
-  seguiu a definição ao pé da letra. Por isso o teste roda os 7 casos, não só
-  os que eu queria consertar.
-- **Uma mudança de cada vez:** voltei a definição original antes de testar o
-  few-shot, para saber o que resolveu.
-- **Few-shot funcionou onde a definição falhou:** resolveu "tive que buscar no
-  correio" (problema na entrega, não atraso).
-- **Exemplos do prompt ≠ exemplos do teste:** senão o modelo só copia a
-  resposta e o teste não prova nada.
-- **Exemplos dos dois lados da fronteira:** incluí um atraso de verdade, para
-  o modelo não aprender a evitar a categoria.
-
-## Limitação conhecida
-
-"Muuuuito demorado, apesar de entregue no prazo!" continua classificado como
-`atraso_ou_nao_recebido` (deveria ser `outro`). A palavra "demorado" pesa mais
-do que "no prazo". Aceito: é raro (1 em 30) e o erro vai para uma categoria
-vizinha. A contagem de atrasos fica um pouco inflada. **Registrar no README
-quando o passo terminar.**
+```sql
+SELECT nota, sentimento, count(*)
+FROM avaliacoes GROUP BY nota, sentimento ORDER BY nota, sentimento;
+```
 
 ## Próximo passo
 
-**Medir o tempo antes de classificar tudo:**
+**Combinar a busca semântica com o filtro por problema**, no
+`10_buscar_avaliacoes.py`. É juntar os dois mundos: a busca acha comentários
+**parecidos** com uma frase, e o filtro garante **sobre o que** eles reclamam.
 
-1. Pegar uma amostra de comentários do banco (não os 7 fixos)
-2. Classificar e cronometrar
-3. Regra de três para as 41.431 (o LLM é bem mais lento que o `bge-m3`;
-   pode dar horas)
-4. Decidir: rodar tudo de noite, só uma parte, ou um modelo menor
+Ideia de consulta:
 
-Depois disso: coluna(s) nova(s) na tabela `avaliacoes`, classificação em
-lotes, e contar quantos caíram em `outro`.
+```sql
+SELECT 1 - (embedding <=> %(q)s) AS score, nota, comment
+FROM avaliacoes
+WHERE 'problema_na_entrega' = ANY(problemas)
+ORDER BY embedding <=> %(q)s
+LIMIT %(k)s
+```
+
+Perguntas para investigar:
+
+- A busca com filtro por problema traz resultados melhores do que o filtro
+  `nota <= 2`? (O item 14 mostrou que a nota perde 35% das reclamações.)
+- O índice HNSW continua sendo usado quando há um `WHERE` junto? Conferir com
+  `EXPLAIN ANALYZE` (lembrar do item 12: o planejador pode preferir o
+  `Seq Scan`).
+- Faz sentido o filtro ser extraído da pergunta pelo LLM, como no self-query do
+  catálogo (`extrair_filtros`)? Ex.: "clientes reclamando de frete" →
+  `problema = 'frete_caro'`.
+
+## Estado do ambiente
+
+- **Modelo da classificação:** `qwen3.8:27b` com `think=False`. Teste:
+  `python classificacao.py` deve dar 15/16 (o ✗ é o "Produto ce qualidade",
+  falha conhecida).
+- **Ollama:** configuração original, **sem** `OLLAMA_NUM_PARALLEL` (revertido;
+  ver README item 15). O `num_ctx: 4096` na `classificar` pode ficar.
+- **Banco:** `problemas TEXT[]` com `CHECK` das nove categorias, `sentimento`,
+  `modelo_classificacao`. Nenhuma linha com `sentimento IS NULL`.
 
 ## Lembretes práticos
 
-- Subir o banco: `docker start pgvector`
+- Subir o banco e o Ollama: `docker start pgvector ollama`
+- Ativar o ambiente virtual: `source ~/.venvs/rag/bin/activate` (prompt com `(rag)`)
 - Entrar no psql: `docker exec -it pgvector psql -U rag -d rag`
-  (ou, já dentro do container, `psql -U rag -d rag`)
-- `rag=#` é o psql (SQL e comandos com `\`); `root@...#` é o bash.
-  `\q` sai do psql.
-- Ver as colunas de uma tabela: `\d avaliacoes`
-  (colunas: `nota`, `comment`; não é `score`)
-- Leitura mais fácil de textos longos no psql: `\x`
+- `rag=#` é o psql; `(rag) mfsever@...$` é o bash. `\q` sai do psql.
+- Comandos com `\` usam o resto da linha: o SQL vai na linha seguinte.
+- Colunas: `nota`, `comment`, `problemas`, `sentimento` (não é `score`).
+  Ver com `\d avaliacoes`.
+- Procurar dentro do array: `'frete_caro' = ANY(problemas)`; contar por
+  categoria: `unnest(problemas)`.
+- Conferir se uma edição foi salva: `grep -n "trecho" arquivo.py`
+- Script longo: `nohup python -u script.py > arquivo.log 2>&1 &`
